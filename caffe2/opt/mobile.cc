@@ -4,6 +4,8 @@
 namespace caffe2 {
 namespace opt {
 
+using namespace nom;
+
 caffe2::NetDef addNNPACK(caffe2::NetDef net, bool low_memory) {
   auto nn = nom::converters::convertFromCaffe2Proto(net);
   for (auto node : nn.dataFlow.getMutableNodes()) {
@@ -68,6 +70,41 @@ caffe2::NetDef addNNPACK(caffe2::NetDef net, bool low_memory) {
       precompute_argument->set_name("convolution_transform_strategy");
       precompute_argument->set_s("PRECOMPUTE");
     }
+  }
+  return nom::converters::convertToCaffe2Proto(nn);
+}
+
+caffe2::NetDef fuseNNPACKConvRelu(caffe2::NetDef net) {
+  auto nn = nom::converters::convertFromCaffe2Proto(net);
+  for (auto node_pair : repr::nn::dataIterator<repr::Conv>(nn.dataFlow)) {
+    repr::NNGraph::NodeRef conv_node;
+    repr::Conv* conv;
+    std::tie(conv, conv_node) = node_pair;
+
+    auto conv_outputs = repr::nn::getOutputs(conv_node);
+    if (conv_outputs.size() != 1) { continue; }
+    auto conv_output = conv_outputs.front();
+
+    auto consumers = repr::nn::getConsumers(conv_output);
+    if (consumers.size() != 1) { continue; }
+    if (!repr::nn::is<repr::Relu>(consumers.front())) { continue; }
+    auto relu_node = consumers.front();
+
+    auto annotation = conv->getMutableAnnotation();
+    if (!annotation) { continue; }
+    auto* op = static_cast<caffe2::OperatorDef*>(annotation->getSaved());
+    if (op->engine() != "NNPACK") { continue; }
+
+    auto relu_outputs = repr::nn::getOutputs(relu_node);
+    if (relu_outputs.size() != 1) { continue; }
+    auto relu_output = relu_outputs.front();
+
+    nn.dataFlow.createEdge(conv_node, relu_output);
+    nn.dataFlow.deleteNode(relu_node);
+    nn.dataFlow.deleteNode(conv_output);
+    auto* arg = op->add_arg();
+    arg->set_name("activation");
+    arg->set_s("Relu");
   }
   return nom::converters::convertToCaffe2Proto(nn);
 }

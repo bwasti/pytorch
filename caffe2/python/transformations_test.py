@@ -20,7 +20,7 @@ from __future__ import unicode_literals
 
 from caffe2.python import core, workspace, test_util
 
-from caffe2.python.transformations import addNNPACK
+from caffe2.python.transformations import addNNPACK, fuseNNPACKConvRelu
 
 
 class TestTransformations(test_util.TestCase):
@@ -32,3 +32,21 @@ class TestTransformations(test_util.TestCase):
         net.Relu(["Y"], ["Y2"])
         addNNPACK(net)
         assert (net.Proto().op[0].engine == "NNPACK")
+
+
+    def test_fuseNNPACKConvRelu(self):
+        net = core.Net("net")
+        net.Conv(
+            ["X", "w", "b"], ["Y"], stride=1, pad=0, kernel=3, order="NCHW"
+        )
+        net.Relu(["Y"], ["Y2"])
+        addNNPACK(net) # get the NNPACK engine
+        assert (net.Proto().op[0].engine == "NNPACK")
+        fuseNNPACKConvRelu(net)
+        assert (len(net.Proto().op) == 1)
+        has_activation_arg = False
+        for arg in net.Proto().op[0].arg:
+            if arg.name == "activation":
+                assert (arg.s == "Relu")
+                has_activation_arg = True
+        assert has_activation_arg
