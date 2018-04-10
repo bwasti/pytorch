@@ -37,6 +37,7 @@ class Predictor {
 
   // Returns true on success
   bool run(const TensorVector& inputs, TensorVector* outputs);
+  bool run_preallocated_output(const TensorVector& inputs, TensorVector* outputs);
 
   // Similar to run, but consumes a map of name to tensor as input
   bool run_map(const TensorMap& inputs, TensorVector* outputs);

@@ -16,7 +16,7 @@ void enforceIsTensor(Workspace* ws, const std::string& name) {
       blob->template IsType<TensorCPU>(), "Blob is not a CPU Tensor: ", name);
 }
 
-void shareInputTensor(
+void shareTensorData(
     Workspace* ws,
     const std::string& name,
     TensorCPU* input) {
@@ -99,7 +99,7 @@ Predictor::~Predictor() {}
 bool Predictor::run(const TensorVector& inputs, TensorVector* outputs) {
   CAFFE_ENFORCE(inputs.size() <= run_net_.external_input_size());
   for (auto i = 0; i < inputs.size(); ++i) {
-    shareInputTensor(&ws_, run_net_.external_input(i), inputs[i]);
+    shareTensorData(&ws_, run_net_.external_input(i), inputs[i]);
   }
 
   if (!ws_.RunNet(run_net_.name())) {
@@ -113,6 +113,26 @@ bool Predictor::run(const TensorVector& inputs, TensorVector* outputs) {
   return true;
 }
 
+bool Predictor::run_preallocated_output(const TensorVector& inputs, TensorVector* outputs) {
+  CAFFE_ENFORCE(inputs.size() <= run_net_.external_input_size());
+  for (auto i = 0; i < inputs.size(); ++i) {
+    shareTensorData(&ws_, run_net_.external_input(i), inputs[i]);
+  }
+
+  outputs->resize(run_net_.external_output_size());
+  for (auto i = 0; i < outputs->size(); ++i) {
+    auto* blob = ws_.CreateBlob(run_net_.external_output(i));
+    auto* tensor = blob->GetMutable<TensorCPU>();
+    shareTensorData(&ws_, run_net_.external_output(i), (*outputs)[i]);
+  }
+
+  if (!ws_.RunNet(run_net_.name())) {
+    return false;
+  }
+
+  return true;
+}
+
 bool Predictor::run_map(const TensorMap& inputs, TensorVector* outputs) {
   if (!inputNames_.empty()) {
     CAFFE_ENFORCE_EQ(inputs.size(), inputNames_.size());
@@ -121,7 +141,7 @@ bool Predictor::run_map(const TensorMap& inputs, TensorVector* outputs) {
     if (!inputNames_.empty()) {
       CAFFE_ENFORCE_GT(inputNames_.count(input.first), 0);
     }
-    shareInputTensor(&ws_, input.first, input.second);
+    shareTensorData(&ws_, input.first, input.second);
   }
 
   if (!ws_.RunNet(run_net_.name())) {
