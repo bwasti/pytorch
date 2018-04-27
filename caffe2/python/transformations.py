@@ -55,3 +55,9 @@ def fuseSumRelu(net):
     net.Proto().ParseFromString(
         C.transform_fuseSumRelu(net.Proto().SerializeToString())
     )
+
+
+def fuseConvBN(net):
+    net.Proto().ParseFromString(
+        C.transform_fuseConvBN(net.Proto().SerializeToString())
+    )

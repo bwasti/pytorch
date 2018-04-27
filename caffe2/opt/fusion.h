@@ -17,6 +17,8 @@
 #ifndef CAFFE2_OPT_FUSION_H_
 #define CAFFE2_OPT_FUSION_H_
 
+#include "caffe2/core/common.h"
+#include "caffe2/core/workspace.h"
 #include "caffe2/proto/caffe2.pb.h"
 
 namespace caffe2 {
@@ -29,6 +31,8 @@ caffe2::NetDef fuseAveragePoolRelu(caffe2::NetDef net);
 caffe2::NetDef fuseMaxPoolRelu(caffe2::NetDef net);
 
 caffe2::NetDef fuseSumRelu(caffe2::NetDef net);
+
+caffe2::NetDef fuseConvBN(caffe2::NetDef net, caffe2::Workspace* ws);
 
 } // namespace opt
 } // namespace caffe2

@@ -1494,6 +1494,16 @@ void addGlobalMethods(py::module& m) {
     return py::bytes(out);
   });
 
+  m.def("transform_fuseConvBN", [](py::bytes def) {
+    CAFFE_ENFORCE(gWorkspace);
+    caffe2::NetDef proto;
+    CAFFE_ENFORCE(ParseProtoFromLargeString(def.cast<std::string>(), &proto));
+    auto new_proto = opt::fuseConvBN(proto, gWorkspace);
+    std::string out;
+    new_proto.SerializeToString(&out);
+    return py::bytes(out);
+  });
+
   m.def("transform_fuseNNPACKConvRelu", [](py::bytes def) {
     caffe2::NetDef proto;
     CAFFE_ENFORCE(ParseProtoFromLargeString(def.cast<std::string>(), &proto));
