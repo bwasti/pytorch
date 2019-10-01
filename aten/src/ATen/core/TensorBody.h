@@ -747,6 +747,7 @@ class CAFFE2_API Tensor {
   Tensor & sparse_resize_(IntArrayRef size, int64_t sparse_dim, int64_t dense_dim) const;
   Tensor & sparse_resize_and_clear_(IntArrayRef size, int64_t sparse_dim, int64_t dense_dim) const;
   Tensor sparse_mask(const Tensor & mask) const;
+  Tensor to_custom_sparse(std::string type) const;
   Tensor to_dense() const;
   int64_t sparse_dim() const;
   int64_t _dimI() const;
