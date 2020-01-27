@@ -4,6 +4,7 @@
 #include <torch/csrc/jit/graph_executor_impl.h>
 #include <torch/csrc/jit/passes/alias_analysis.h>
 #include <torch/csrc/jit/passes/inliner.h>
+#include <torch/csrc/jit/import.h>
 
 #include <stack>
 
@@ -292,7 +293,9 @@ script::Module freeze_module(const script::Module& module) {
   // TODO: Determine if freezing in training mode is useful and further clarify
   // its semantics.
   TORCH_INTERNAL_ASSERT(!module.is_training());
-  auto moduleClone = module.clone();
+  std::stringstream ss;
+  module.save(ss);
+  auto moduleClone = torch::jit::load(ss);//module.clone();
   AttributePropagator attrPropagator(moduleClone);
   script::Method method = moduleClone.get_method("forward");
   auto graph = method.graph();

@@ -9,6 +9,7 @@
 #include <torch/csrc/jit/import.h>
 #include <torch/csrc/jit/irparser.h>
 #include <torch/csrc/jit/operator.h>
+#include <torch/csrc/jit/pass_manager.h>
 #include <torch/csrc/jit/passes/canonicalize.h>
 #include <torch/csrc/jit/passes/canonicalize_ops.h>
 #include <torch/csrc/jit/passes/common_subexpression_elimination.h>
@@ -51,6 +52,7 @@
 #include <torch/csrc/jit/python_ir.h>
 #include <torch/csrc/jit/python_tracer.h>
 #include <torch/csrc/jit/script/compiler.h>
+#include <torch/csrc/jit/init.h>
 #include <torch/csrc/jit/script/init.h>
 #include <torch/csrc/jit/script/jit_exception.h>
 #include <torch/csrc/jit/script/module.h>
@@ -79,6 +81,7 @@ using ::c10::Argument;
 using ::c10::FunctionSchema;
 using caffe2::serialize::PyTorchStreamReader;
 using caffe2::serialize::PyTorchStreamWriter;
+
 
 namespace {
 
@@ -690,6 +693,9 @@ void initJITBindings(PyObject* module) {
   tracer::initPythonTracerBindings(module);
   script::initTreeViewBindings(module);
   script::initJitScriptBindings(module);
+  for (auto& f : getCustomInitFuncs()) {
+    f(m);
+  }
 
   setPrintHandler([](const std::string& str) {
     py::gil_scoped_acquire acquire;
