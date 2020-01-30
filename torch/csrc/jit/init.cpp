@@ -52,7 +52,6 @@
 #include <torch/csrc/jit/python_ir.h>
 #include <torch/csrc/jit/python_tracer.h>
 #include <torch/csrc/jit/script/compiler.h>
-#include <torch/csrc/jit/init.h>
 #include <torch/csrc/jit/script/init.h>
 #include <torch/csrc/jit/script/jit_exception.h>
 #include <torch/csrc/jit/script/module.h>
@@ -693,8 +692,8 @@ void initJITBindings(PyObject* module) {
   tracer::initPythonTracerBindings(module);
   script::initTreeViewBindings(module);
   script::initJitScriptBindings(module);
-  for (auto& f : getCustomInitFuncs()) {
-    f(m);
+  for (auto& kv : getCustomInitFuncs()) {
+    m.def(kv.first.c_str(), kv.second);
   }
 
   setPrintHandler([](const std::string& str) {

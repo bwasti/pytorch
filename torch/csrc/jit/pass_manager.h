@@ -1,7 +1,7 @@
 #pragma once
 
 #include <torch/csrc/jit/ir.h>
-#include <pybind11/pybind11.h>
+//#include <pybind11/pybind11.h>
 
 /* `getCustomPasses()` returns a vector of passes that will be executed after
  * differentiation but before any fusion.  This is the de-facto location
@@ -26,12 +26,12 @@ struct TORCH_API RegisterPass {
   RegisterPass(Pass p);
 };
 
-using InitFunc = std::function<void(pybind11::module&)>;
+using InitFunc = std::function<void(script::Module&, std::vector<bool>)>;
 
-TORCH_API std::vector<InitFunc>& getCustomInitFuncs();
+TORCH_API std::unordered_map<std::string, InitFunc>& getCustomInitFuncs();
 
 struct TORCH_API RegisterCustomInit {
-  RegisterCustomInit(InitFunc p);
+  RegisterCustomInit(std::string name, InitFunc p);
 };
 
 
