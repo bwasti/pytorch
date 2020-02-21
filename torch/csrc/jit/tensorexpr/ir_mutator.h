@@ -19,8 +19,7 @@ class Lshift;
 class Rshift;
 class CompareSelect;
 
-#define IMM_DECLARE(Type, Name) \
-  class Name##Imm;
+#define IMM_DECLARE(Type, Name) class Name##Imm;
 AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, IMM_DECLARE);
 #undef IMM_DECLARE
 
@@ -33,12 +32,14 @@ class Load;
 class For;
 class Block;
 class Store;
+class OpaqueCall;
 class Broadcast;
 class IfThenElse;
 class ExprHandle;
 class Expr;
 class BaseCallNode;
 class Intrinsics;
+class CallExternal;
 class FunctionCall;
 class Allocate;
 class Free;
@@ -62,7 +63,7 @@ class TORCH_API IRMutator {
   virtual const Expr* mutate(const CompareSelect* v);
 #define IMM_MUTATE_DECLARE(Type, Name) \
   virtual const Expr* mutate(const Name##Imm* v);
-AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, IMM_MUTATE_DECLARE);
+  AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, IMM_MUTATE_DECLARE);
 #undef IMM_MUTATE_DECLARE
   virtual const Expr* mutate(const Cast* v);
   virtual const Expr* mutate(const Var* v);
@@ -86,6 +87,7 @@ AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, IMM_MUTATE_DECLARE);
   virtual Stmt* mutate(const For* v);
   virtual Stmt* mutate(const Block* v);
   virtual Stmt* mutate(const Store* v);
+  virtual Stmt* mutate(const OpaqueCall* v);
 
   virtual Stmt* mutate(const Allocate* v);
   virtual Stmt* mutate(const Free* v);

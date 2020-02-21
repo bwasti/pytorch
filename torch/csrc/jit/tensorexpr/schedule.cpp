@@ -8,7 +8,6 @@
 
 #include "torch/csrc/jit/tensorexpr/eval.h"
 #include "torch/csrc/jit/tensorexpr/ir_mutator.h"
-#include "torch/csrc/jit/tensorexpr/ir_printer.h"
 #include "torch/csrc/jit/tensorexpr/tensor.h"
 
 namespace torch {
@@ -128,12 +127,15 @@ ScheduleNode::ScheduleNode(const std::vector<Tensor*>& tensors)
     }
     // TODO: handles the scalar case where ndims == 0
     TensorExprNode* expr_node = current_func;
-    for (int i = 0; i < func->ndim(); i++) {
+    if (dynamic_cast<const CallExternal*>(tensor_node->body()) == nullptr) {
+      for (int i = 0; i < func->ndim(); i++) {
+        expr_node = expr_node->NewFirstChild();
+        LoopAxis* loop_axis = this->NewAxis(
+            VarHandle(func->arg(i)), Range(0, ExprHandle(func->dim(i))));
+        expr_node->set_loop_axis(loop_axis);
+      }
       expr_node = expr_node->NewFirstChild();
-      LoopAxis* loop_axis = this->NewAxis(VarHandle(func->arg(i)), Range(0, ExprHandle(func->dim(i))));
-      expr_node->set_loop_axis(loop_axis);
     }
-    expr_node = expr_node->NewFirstChild();
     TensorExprOp* tensor_expr_op = this->NewTensorExprOp(func);
     expr_node->set_tensor_expr_op(tensor_expr_op);
 
@@ -322,7 +324,8 @@ void ScheduleNode::SplitWithMask(
   outer_node->SetNextSibling(loop_sibling);
 
   CHECK(expr_node->is_tensor_expr_op());
-  expr_node->tensor_expr_op()->AddPredicate(split_transform->predicate().node());
+  expr_node->tensor_expr_op()->AddPredicate(
+      split_transform->predicate().node());
   expr_node->tensor_expr_op()->ApplyLoopTransform(split_transform, 0);
   TensorExprNode::ReplaceSubtree(loop_node, outer_node);
 }
@@ -395,7 +398,7 @@ ScheduleObject* ScheduleNode::CloneScheduleObject(ScheduleObject* object) {
 class Flattener : public IRMutator {
  private:
   Expr* mutate(const FunctionCall* v) override {
-    const Tensor *t = v->tensor();
+    const Tensor* t = v->tensor();
     Buffer buffer(
         VarHandle(t->func_var()),
         t->body()->dtype(),
@@ -566,9 +569,7 @@ Stmt* ScheduleNode::Lower() {
       continue;
     }
     Stmt* alloc = new Allocate(
-        tensor->func_var(),
-        tensor->body()->dtype(),
-        tensor->dims());
+        tensor->func_var(), tensor->body()->dtype(), tensor->dims());
     allocs.push_back(alloc);
     Stmt* free = new Free(tensor->func_var());
     frees.push_back(free);
@@ -762,7 +763,8 @@ SplitAxisWithTail::SplitAxisWithTail(
   const std::string& loop_var_name = loop_axis->var().name_hint();
   Dtype loop_var_dtype = loop_axis->var().dtype();
   LoopAxis* outer = this->NewAxis(
-      VarHandle(loop_var_name + "_outer", loop_var_dtype), Range(0, split_count));
+      VarHandle(loop_var_name + "_outer", loop_var_dtype),
+      Range(0, split_count));
   LoopAxis* inner = this->NewAxis(
       VarHandle(loop_var_name + "_inner", loop_var_dtype), Range(0, factor));
   this->set_output_group(0, {outer, inner});
@@ -770,7 +772,8 @@ SplitAxisWithTail::SplitAxisWithTail(
   // The tail group
   if (output_group_count == 2) {
     LoopAxis* tail = this->NewAxis(
-        VarHandle(loop_var_name + "_tail", loop_var_dtype), Range(0, tail_size));
+        VarHandle(loop_var_name + "_tail", loop_var_dtype),
+        Range(0, tail_size));
     this->set_output_group(1, {tail});
   }
 }
@@ -788,14 +791,16 @@ SplitAxisWithMask::SplitAxisWithMask(
   auto const& sizeExpr = this->stop() - this->start();
   bool needsPredicate = true;
   if (this->stop().AsNode<IntImm>() && this->start().AsNode<IntImm>()) {
-    int size = stop().AsNode<IntImm>()->value() - start().AsNode<IntImm>()->value();
+    int size =
+        stop().AsNode<IntImm>()->value() - start().AsNode<IntImm>()->value();
     if ((size % factor) == 0) {
       needsPredicate = false;
     }
   }
   if (needsPredicate) {
     IntImm* start = this->start().AsNode<IntImm>();
-    CHECK(start && start->value() == 0) << "Non-zero start is not implemented yet";
+    CHECK(start && start->value() == 0)
+        << "Non-zero start is not implemented yet";
     predicate_ = CompareSelect::make(loop_axis->var(), this->stop(), kLT);
   }
   auto const& split_count = (sizeExpr + factor - 1) / factor;
@@ -804,7 +809,8 @@ SplitAxisWithMask::SplitAxisWithMask(
   const std::string& loop_var_name = loop_axis->var().name_hint();
   Dtype loop_var_dtype = loop_axis->var().dtype();
   LoopAxis* outer = this->NewAxis(
-      VarHandle(loop_var_name + "_outer", loop_var_dtype), Range(0, split_count));
+      VarHandle(loop_var_name + "_outer", loop_var_dtype),
+      Range(0, split_count));
   LoopAxis* inner = this->NewAxis(
       VarHandle(loop_var_name + "_inner", loop_var_dtype), Range(0, factor));
   this->set_output_group(0, {outer, inner});
@@ -836,7 +842,9 @@ Stmt* SplitAxisWithTail::ConvertToNewArgs(Stmt* stmt, int output_group) {
   return new_stmt;
 }
 
-ExprHandle SplitAxisWithTail::ConvertToNewArgs(ExprHandle* expr, int output_group) {
+ExprHandle SplitAxisWithTail::ConvertToNewArgs(
+    ExprHandle* expr,
+    int output_group) {
   ExprHandle combined_index = combined_loop_index(output_group);
   ExprHandle new_expr = Substitute(expr, {{input(0)->var(), combined_index}});
   return new_expr;
@@ -848,7 +856,8 @@ ExprHandle SplitAxisWithMask::combined_loop_index(int output_group) {
   VarHandle original_var = original_axis->var();
   LoopAxis* outer = this->output(0, 0);
   LoopAxis* inner = this->output(0, 1);
-  ExprHandle combined_index = outer->var() * inner->range().stop() + inner->var();
+  ExprHandle combined_index =
+      outer->var() * inner->range().stop() + inner->var();
   return combined_index;
 }
 
@@ -858,7 +867,9 @@ Stmt* SplitAxisWithMask::ConvertToNewArgs(Stmt* stmt, int output_group) {
   return new_stmt;
 }
 
-ExprHandle SplitAxisWithMask::ConvertToNewArgs(ExprHandle* expr, int output_group) {
+ExprHandle SplitAxisWithMask::ConvertToNewArgs(
+    ExprHandle* expr,
+    int output_group) {
   ExprHandle combined_index = combined_loop_index(output_group);
   ExprHandle new_expr = Substitute(expr, {{input(0)->var(), combined_index}});
   return new_expr;
