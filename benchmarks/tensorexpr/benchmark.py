@@ -4,6 +4,7 @@ import os
 import time
 from . import tensor_engine
 import torch
+import json
 
 
 class Benchmark(object):
@@ -11,6 +12,7 @@ class Benchmark(object):
         self.mode = mode
         self.deterministic = False
         self.device = device
+        self.output_type = "stdout"
         if mode == "both":
             self.requires_grad = True
         elif mode == "fwd":
@@ -154,15 +156,33 @@ class Benchmark(object):
         memory_workload = self.memory_workload()
         compute_workload = self.compute_workload()
 
-        msg = "%s: %.2f us, SOL %.2f GB/s, algorithmic %.2f GB/s" % (
-            self.desc(),
-            iter_time * 1e6,
-            memory_workload["sol"] / iter_time / 1e9,
-            memory_workload["algorithmic"] / iter_time / 1e9,
-        )
-        if compute_workload is not None:
-            msg += ", compute %.2f Gops/s" % (compute_workload / iter_time / 1e9)
-        print(msg)
+        result_dict = {
+            "desc": self.desc(),
+            "us": iter_time * 1e6,
+            "sol": memory_workload["sol"] / iter_time / 1e9,
+            "algorithmic": memory_workload["algorithmic"] / iter_time / 1e9,
+        }
+        if compute_workload:
+            result_dict["compute_workload"] = compute_workload / iter_time / 1e9
+        self.dump_result(result_dict)
+
+    def dump_result(self, result_dict):
+        if self.output_type == "json":
+            print(json.dumps(result_dict))
+        elif self.output_type == "stdout":
+            msg = "%s: %.2f us, SOL %.2f GB/s, algorithmic %.2f GB/s" % (
+                result_dict["desc"],
+                result_dict["us"],
+                result_dict["sol"],
+                result_dict["algorithmic"],
+            )
+            if "compute_workload" in result_dict:
+                msg += ", compute %.2f Gops/s" % (
+                    result_dict["compute_workload"] / iter_time / 1e9
+                )
+            print(msg)
+        else:
+            raise Exception("Unknown output_type " + self.output_type)
 
 
 @contextlib.contextmanager

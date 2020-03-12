@@ -83,6 +83,12 @@ Works only with Python3.\n A few examples:
         default="te",
         help="The Cuda fuser backend to use: one of {te, old, none}",
     )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="stdout",
+        help="The output format of the benchmark run {stdout[default], json}",
+    )
 
     args = parser.parse_args()
 
@@ -128,6 +134,7 @@ Works only with Python3.\n A few examples:
             modes, devices, bench_cls.default_configs()
         ):
             bench = bench_cls(mode, device, *config)
+            bench.output_type = args.output
             bench.jit_mode = args.jit_mode
             if not bench.is_supported():
                 if allow_skip:
@@ -179,6 +186,7 @@ Works only with Python3.\n A few examples:
                             pass
                     bench = bench_cls(*config)
                     bench.jit_mode = args.jit_mode
+                    bench.output_type = args.output_type
                     bench.run(args)
 
             if not match_class_name:
