@@ -188,11 +188,11 @@ void LLVMCodeGen::call(const std::vector<CallArg>& args) {
     throw malformed_input("wrong number of args in call");
   }
 
-  std::vector<void*> argv;
-  for (size_t i = 0; i < buffer_args().size(); i++) {
+  void** argv = impl_->getArgvAddress();
+  for (size_t i = 0, e = buffer_args().size(); i < e; i++) {
     auto const& bufferArg = buffer_args()[i];
     auto const& callArg = args[i];
-    argv.push_back(argToPtr(bufferArg, callArg));
+    argv[i] = argToPtr(bufferArg, callArg);
   }
   value<float>(argv);
   USE_TRIGGER(llvm_codegen_executed);
@@ -204,6 +204,10 @@ void* LLVMCodeGen::getKernelAddress(LLVMCodeGenImpl* impl) {
 
 void* LLVMCodeGenImpl::getKernelAddress() const {
   return kernelAddress_;
+}
+
+void** LLVMCodeGenImpl::getArgvAddress() const {
+  return argv_.get();
 }
 
 LLVMCodeGenImpl::LLVMCodeGenImpl(
