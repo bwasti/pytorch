@@ -12,6 +12,7 @@
 #include "torch/csrc/jit/tensorexpr/llvm_codegen.h"
 #include "torch/csrc/jit/tensorexpr/loopnest.h"
 #include "torch/csrc/jit/tensorexpr/tensor.h"
+#include "xbyak/xbyak.h"
 
 #include <numeric>
 
@@ -1201,7 +1202,6 @@ void testLLVMEliminatedStmt() {
   cg.call({aData, cData});
 }
 
-
 void testLLVMSimpleReduction() {
   KernelScope kernel_scope;
 
@@ -1290,11 +1290,37 @@ void testLLVMRFactorReduction() {
   ExpectAllNear(b_v, b_ref, 1e-5);
 }
 
+class Profiler {
+ public:
+  Profiler(std::string name, size_t achieved_flops, size_t peak_flops)
+      : m_name(std::move(name)),
+        m_beg(std::chrono::high_resolution_clock::now()),
+        flops(achieved_flops),
+        peak(peak_flops) {}
+  ~Profiler() {
+    auto end = std::chrono::high_resolution_clock::now();
+    auto dur =
+        std::chrono::duration_cast<std::chrono::microseconds>(end - m_beg);
+    float gflops = float(flops) / (dur.count() * float(1000));
+    float peak_gflops = float(peak) / 1e9;
+    std::cout << m_name << " : " << dur.count() << "us " << gflops << "GFlops ("
+              << 100.f * gflops / peak_gflops << "% of peak)\n";
+  }
+
+ private:
+  std::string m_name;
+  std::chrono::time_point<std::chrono::high_resolution_clock> m_beg;
+  size_t flops;
+  size_t peak;
+};
+
+constexpr size_t iters = 1e7;
+
 void testLLVMRFactorVectorizedReduction() {
   KernelScope kernel_scope;
 
-  int M = 128;
-  int N = 64;
+  int M = 64;
+  int N = 128;
   const int kTotalSize = M * N;
 
   Buffer a("a", kFloat, {1, M, N});
@@ -1328,10 +1354,12 @@ void testLLVMRFactorVectorizedReduction() {
   For* new_outer;
   For* split;
   For* tail;
-  loopnest.splitWithTail(outer_loop, 8, &new_outer, &split, &tail);
+  loopnest.splitWithTail(outer_loop, 128, &new_outer, &split, &tail);
   loopnest.vectorize(split);
 
   s = IRSimplifier::simplify(s);
+  std::cerr << "----TE IR----\n";
+  std::cerr << *s << "\n";
   LLVMCodeGen cg(s, {a, b});
 
   PaddedBuffer<float> a_v(1, M, N, "a_v");
@@ -1347,9 +1375,286 @@ void testLLVMRFactorVectorizedReduction() {
     }
   }
 
-  cg.call({a_v, b_v});
+  for (size_t i = 0; i < 1000; ++i) {
+    cg.call({a_v, b_v});
+  }
+  {
+    Profiler p("llvm vec rfactor", M * N * iters, 128 * 2.5 * 1e9 / 4);
+    for (size_t i = 0; i < iters; ++i) {
+      cg.call({a_v, b_v});
+    }
+  }
 
   ExpectAllNear(b_v, b_ref, 1e-5);
+}
+
+typedef void (*ret_type)(float*, float*, size_t);
+
+ret_type genFunc(Xbyak::CodeGenerator& code, size_t unroll_size) {
+  using namespace Xbyak::util;
+  // load 32 values 4x8
+  code.vmovups(ymm0, ptr[rdi + 4 * (0 + 0)]);
+  code.vmovups(ymm1, ptr[rdi + 4 * (0 + 8)]);
+  code.vmovups(ymm2, ptr[rdi + 4 * (0 + 16)]);
+  code.vmovups(ymm3, ptr[rdi + 4 * (0 + 24)]);
+
+  code.mov(rcx, 32);
+
+  if (unroll_size) {
+    assert(unroll_size > 32);
+    size_t unroll = unroll_size;
+    code.L("L1");
+    for (size_t off = 0; off < unroll; off += 32) {
+      code.vaddps(ymm0, ymm0, ptr[rdi + rcx * 4 + 4 * (off + 0)]);
+      code.vaddps(ymm1, ymm1, ptr[rdi + rcx * 4 + 4 * (off + 8)]);
+      code.vaddps(ymm2, ymm2, ptr[rdi + rcx * 4 + 4 * (off + 16)]);
+      code.vaddps(ymm3, ymm3, ptr[rdi + rcx * 4 + 4 * (off + 24)]);
+    }
+
+    code.add(rcx, unroll);
+    code.sub(rdx, unroll);
+    code.cmp(rdx, unroll);
+    code.jnbe("L1");
+  }
+
+  {
+    size_t unroll = 32;
+    size_t off = 0;
+    code.L("L0");
+    code.vaddps(ymm0, ymm0, ptr[rdi + rcx * 4 + 4 * (off + 0)]);
+    code.vaddps(ymm1, ymm1, ptr[rdi + rcx * 4 + 4 * (off + 8)]);
+    code.vaddps(ymm2, ymm2, ptr[rdi + rcx * 4 + 4 * (off + 16)]);
+    code.vaddps(ymm3, ymm3, ptr[rdi + rcx * 4 + 4 * (off + 24)]);
+
+    code.add(rcx, unroll);
+    code.sub(rdx, unroll);
+    code.cmp(rdx, unroll);
+    code.jnbe("L0");
+  }
+
+  // Reduction over used registers
+  code.vaddps(ymm0, ymm0, ymm3);
+
+  code.vaddps(ymm1, ymm1, ymm2);
+  code.vaddps(ymm0, ymm0, ymm1);
+
+  // Register-wide reduction
+  code.vhaddps(ymm0, ymm0, ymm0);
+  code.vhaddps(ymm0, ymm0, ymm0);
+  code.vextractf128(xmm1, ymm0, 1);
+  code.vaddps(xmm0, xmm0, xmm1);
+  code.movups(ptr[rsi], xmm0);
+
+  code.ret();
+  void (*f)(float*, float*, size_t) =
+      code.getCode<void (*)(float*, float*, size_t)>();
+  return f;
+}
+
+ret_type genFunc2(Xbyak::CodeGenerator& code) {
+  using namespace Xbyak::util;
+  // load 64 values 8x8
+  code.vmovups(ymm0, ptr[rdi + 4 * (0 + 0)]);
+  code.vmovups(ymm1, ptr[rdi + 4 * (0 + 8)]);
+  code.vmovups(ymm2, ptr[rdi + 4 * (0 + 16)]);
+  code.vmovups(ymm3, ptr[rdi + 4 * (0 + 24)]);
+  code.vmovups(ymm4, ptr[rdi + 4 * (0 + 32)]);
+  code.vmovups(ymm5, ptr[rdi + 4 * (0 + 40)]);
+  code.vmovups(ymm6, ptr[rdi + 4 * (0 + 48)]);
+  code.vmovups(ymm7, ptr[rdi + 4 * (0 + 56)]);
+
+  code.mov(rcx, 64);
+
+  {
+    size_t unroll = 64;
+    size_t off = 0;
+    code.L("L0");
+    code.vaddps(ymm0, ymm0, ptr[rdi + rcx * 4 + 4 * (off + 0)]);
+    code.vaddps(ymm1, ymm1, ptr[rdi + rcx * 4 + 4 * (off + 8)]);
+    code.vaddps(ymm2, ymm2, ptr[rdi + rcx * 4 + 4 * (off + 16)]);
+    code.vaddps(ymm3, ymm3, ptr[rdi + rcx * 4 + 4 * (off + 24)]);
+    code.vaddps(ymm4, ymm4, ptr[rdi + rcx * 4 + 4 * (off + 32)]);
+    code.vaddps(ymm5, ymm5, ptr[rdi + rcx * 4 + 4 * (off + 40)]);
+    code.vaddps(ymm6, ymm6, ptr[rdi + rcx * 4 + 4 * (off + 48)]);
+    code.vaddps(ymm7, ymm7, ptr[rdi + rcx * 4 + 4 * (off + 56)]);
+
+    code.add(rcx, unroll);
+    code.sub(rdx, unroll);
+    code.cmp(rdx, unroll);
+    code.jnbe("L0");
+  }
+
+  // Reduction over used registers
+  code.vaddps(ymm0, ymm0, ymm4);
+  code.vaddps(ymm1, ymm1, ymm5);
+  code.vaddps(ymm2, ymm2, ymm6);
+  code.vaddps(ymm3, ymm3, ymm7);
+
+  code.vaddps(ymm0, ymm0, ymm3);
+  code.vaddps(ymm1, ymm1, ymm2);
+
+  code.vaddps(ymm0, ymm0, ymm1);
+
+  // Register-wide reduction
+  code.vhaddps(ymm0, ymm0, ymm0);
+  code.vhaddps(ymm0, ymm0, ymm0);
+  code.vextractf128(xmm1, ymm0, 1);
+  code.vaddps(xmm0, xmm0, xmm1);
+  code.movups(ptr[rsi], xmm0);
+
+  code.ret();
+  void (*f)(float*, float*, size_t) =
+      code.getCode<void (*)(float*, float*, size_t)>();
+  return f;
+}
+
+ret_type genFunc512(Xbyak::CodeGenerator& code) {
+  using namespace Xbyak::util;
+  // load 64 values 8x8
+  code.vmovups(zmm0, ptr[rdi + 4 * (0 + 0)]);
+  code.vmovups(zmm1, ptr[rdi + 4 * (0 + 16)]);
+  code.vmovups(zmm2, ptr[rdi + 4 * (0 + 32)]);
+  code.vmovups(zmm3, ptr[rdi + 4 * (0 + 48)]);
+  code.vmovups(zmm4, ptr[rdi + 4 * (0 + 64)]);
+  code.vmovups(zmm5, ptr[rdi + 4 * (0 + 80)]);
+  code.vmovups(zmm6, ptr[rdi + 4 * (0 + 96)]);
+  code.vmovups(zmm7, ptr[rdi + 4 * (0 + 112)]);
+
+  code.mov(rcx, 128);
+
+  {
+    size_t unroll = 128;
+    size_t off = 0;
+    code.L("L0");
+    code.vaddps(zmm0, zmm0, ptr[rdi + rcx * 4 + 4 * (off + 0)]);
+    code.vaddps(zmm1, zmm1, ptr[rdi + rcx * 4 + 4 * (off + 16)]);
+    code.vaddps(zmm2, zmm2, ptr[rdi + rcx * 4 + 4 * (off + 32)]);
+    code.vaddps(zmm3, zmm3, ptr[rdi + rcx * 4 + 4 * (off + 48)]);
+    code.vaddps(zmm4, zmm4, ptr[rdi + rcx * 4 + 4 * (off + 64)]);
+    code.vaddps(zmm5, zmm5, ptr[rdi + rcx * 4 + 4 * (off + 80)]);
+    code.vaddps(zmm6, zmm6, ptr[rdi + rcx * 4 + 4 * (off + 96)]);
+    code.vaddps(zmm7, zmm7, ptr[rdi + rcx * 4 + 4 * (off + 112)]);
+
+    code.add(rcx, unroll);
+    code.sub(rdx, unroll);
+    code.cmp(rdx, unroll);
+    code.jnbe("L0");
+  }
+
+  // Reduction over used registers
+  code.vaddps(zmm0, zmm0, zmm4);
+  code.vaddps(zmm1, zmm1, zmm5);
+  code.vaddps(zmm2, zmm2, zmm6);
+  code.vaddps(zmm3, zmm3, zmm7);
+
+  code.vaddps(zmm0, zmm0, zmm3);
+  code.vaddps(zmm1, zmm1, zmm2);
+
+  code.vaddps(zmm0, zmm0, zmm1);
+
+  // code.vextractf32x8(ymm0, zmm0, 0);
+  code.vextractf32x8(ymm1, zmm0, 1);
+  code.vaddps(ymm0, ymm0, ymm1);
+  // Register-wide reduction
+  code.vhaddps(ymm0, ymm0, ymm0);
+  code.vhaddps(ymm0, ymm0, ymm0);
+  code.vextractf128(xmm1, ymm0, 1);
+  code.vaddps(xmm0, xmm0, xmm1);
+  code.movups(ptr[rsi], xmm0);
+
+  code.ret();
+  void (*f)(float*, float*, size_t) =
+      code.getCode<void (*)(float*, float*, size_t)>();
+  return f;
+}
+
+void testLLVMRFactorReferenceReduction() {
+  size_t N = 64 * 128;
+  std::vector<float> A(N);
+  float ref_out = 0;
+  for (size_t i = 0; i < N; ++i) {
+    A[i] = 0.01f * rand();
+    ref_out += A[i];
+  }
+  // padded
+  std::vector<float> C(4);
+  C[0] = 0.0f;
+
+  {
+    Xbyak::CodeGenerator code;
+    auto f = genFunc(code, 0);
+    f(A.data(), C.data(), A.size() - 1);
+    std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
+    for (size_t i = 0; i < 1000; ++i) {
+      f(A.data(), C.data(), A.size() - 1);
+    }
+    {
+      Profiler p("ref reduction no unroll", N * iters, 128 * 2.5 * 1e9 / 4);
+      for (size_t i = 0; i < iters; ++i) {
+        f(A.data(), C.data(), A.size() - 1);
+      }
+    }
+  }
+  {
+    Xbyak::CodeGenerator code;
+    auto f = genFunc(code, 128);
+    f(A.data(), C.data(), A.size() - 1);
+    std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
+    for (size_t i = 0; i < 1000; ++i) {
+      f(A.data(), C.data(), A.size() - 1);
+    }
+    {
+      Profiler p("ref reduction unroll=4", N * iters, 128 * 2.5 * 1e9 / 4);
+      for (size_t i = 0; i < iters; ++i) {
+        f(A.data(), C.data(), A.size() - 1);
+      }
+    }
+  }
+  {
+    Xbyak::CodeGenerator code;
+    auto f = genFunc(code, 2048);
+    f(A.data(), C.data(), A.size() - 1);
+    std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
+    for (size_t i = 0; i < 1000; ++i) {
+      f(A.data(), C.data(), A.size() - 1);
+    }
+    {
+      Profiler p("ref reduction unroll=64", N * iters, 128 * 2.5 * 1e9 / 4);
+      for (size_t i = 0; i < iters; ++i) {
+        f(A.data(), C.data(), A.size() - 1);
+      }
+    }
+  }
+  {
+    Xbyak::CodeGenerator code;
+    auto f = genFunc2(code);
+    f(A.data(), C.data(), A.size() - 1);
+    std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
+    for (size_t i = 0; i < 1000; ++i) {
+      f(A.data(), C.data(), A.size() - 1);
+    }
+    {
+      Profiler p("ref reduction 8 reg", N * iters, 128 * 2.5 * 1e9 / 4);
+      for (size_t i = 0; i < iters; ++i) {
+        f(A.data(), C.data(), A.size() - 1);
+      }
+    }
+  }
+  {
+    Xbyak::CodeGenerator code;
+    auto f = genFunc512(code);
+    f(A.data(), C.data(), A.size() - 1);
+    std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
+    for (size_t i = 0; i < 1000; ++i) {
+      f(A.data(), C.data(), A.size() - 1);
+    }
+    {
+      Profiler p("ref reduction 512 8 reg", N * iters, 128 * 2.5 * 1e9 / 4);
+      for (size_t i = 0; i < iters; ++i) {
+        f(A.data(), C.data(), A.size() - 1);
+      }
+    }
+  }
 }
 
 } // namespace jit
