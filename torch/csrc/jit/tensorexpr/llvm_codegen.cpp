@@ -1462,11 +1462,20 @@ void LLVMCodeGenImpl::visit(const FunctionCall* v) {
 }
 
 void LLVMCodeGenImpl::visit(const Allocate* v) {
-  throw unimplemented_lowering(v);
+  llvm::Value* size =
+    llvm::ConstantInt::getSigned(LongTy_, v->dtype().byte_size());
+  for (const Expr* e : v->dims()) {
+    e->accept(this);
+    size = irb_.CreateMul(size, irb_.CreateZExt(value_, LongTy_));
+  }
+
+  value_ = irb_.CreateAlloca(dtypeToLLVM(v->dtype()), size);
+  varToVal_[v->buffer_var()] = value_;
+  value_ = llvm::ConstantInt::get(IntTy_, 0);
 }
 
 void LLVMCodeGenImpl::visit(const Free* v) {
-  throw unimplemented_lowering(v);
+  value_ = llvm::ConstantInt::get(IntTy_, 0);
 }
 
 void LLVMCodeGenImpl::visit(const Cond* v) {
