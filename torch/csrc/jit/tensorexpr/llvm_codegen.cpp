@@ -1464,7 +1464,7 @@ void LLVMCodeGenImpl::visit(const FunctionCall* v) {
 
 void LLVMCodeGenImpl::visit(const Allocate* v) {
   llvm::Value* size =
-    llvm::ConstantInt::getSigned(LongTy_, v->dtype().byte_size());
+      llvm::ConstantInt::getSigned(LongTy_, v->dtype().byte_size());
   for (const Expr* e : v->dims()) {
     e->accept(this);
     size = irb_.CreateMul(size, irb_.CreateZExt(value_, LongTy_));
