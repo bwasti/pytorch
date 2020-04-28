@@ -1344,6 +1344,10 @@ void testLLVMRFactorVectorizedReduction() {
 
   cg.call({a_v, b_v});
 
+  for (size_t i = 0; i < 1e9; ++i) {
+    cg.call({a_v, b_v});
+  }
+
   ExpectAllNear(b_v, b_ref, 1e-5);
 }
 

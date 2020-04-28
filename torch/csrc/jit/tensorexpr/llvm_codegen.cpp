@@ -42,6 +42,7 @@ class LLVMCodeGenImpl : public IRVisitor {
   llvm::BasicBlock* bb_;
   llvm::Value* value_{nullptr};
   void* kernelAddress_;
+  std::unique_ptr<void* []> argv_ { nullptr };
 
 #define LLVM_TYPE_DECLARE(_1, Name) llvm::Type* Name##Ty_;
   AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, LLVM_TYPE_DECLARE);
@@ -66,6 +67,7 @@ class LLVMCodeGenImpl : public IRVisitor {
   ~LLVMCodeGenImpl() = default;
 
   void* getKernelAddress() const;
+  void** getArgvAddress() const;
 
   void visit(const Add* v) override;
   void visit(const Sub* v) override;
@@ -183,6 +185,10 @@ static void* argToPtr(
   return nullptr;
 }
 
+void** LLVMCodeGenImpl::getArgvAddress() const {
+  return argv_.get();
+}
+
 void LLVMCodeGen::call(const std::vector<CallArg>& args) {
   const auto& buf_args = buffer_args();
   if (args.size() != buf_args.size()) {
@@ -205,10 +211,6 @@ void* LLVMCodeGen::getKernelAddress(LLVMCodeGenImpl* impl) {
 
 void* LLVMCodeGenImpl::getKernelAddress() const {
   return kernelAddress_;
-}
-
-void** LLVMCodeGenImpl::getArgvAddress() const {
-  return argv_.get();
 }
 
 LLVMCodeGenImpl::LLVMCodeGenImpl(
@@ -264,6 +266,7 @@ LLVMCodeGenImpl::LLVMCodeGenImpl(
 
   jit_->addModule(std::move(module_));
   kernelAddress_ = jit_->findSymbol("wrapper");
+  argv_ = std::make_unique<void*[]>(params.size());
 
   USE_TRIGGER(llvm_codegen_created);
 }
