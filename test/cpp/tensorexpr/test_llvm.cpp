@@ -1314,13 +1314,17 @@ class Profiler {
   size_t peak;
 };
 
+constexpr size_t warmup = 1e2;
 constexpr size_t iters = 1e7;
+constexpr int outer = 128 * 1 << 6; // 1024 * 8;
+constexpr int inner = 64;
+constexpr size_t bandwidth = outer * inner > 1<<18 ? 32 : 128;
 
 void testLLVMRFactorVectorizedReduction() {
   KernelScope kernel_scope;
 
-  int M = 64;
-  int N = 128;
+  int M = outer;
+  int N = inner;
   const int kTotalSize = M * N;
 
   Buffer a("a", kFloat, {1, M, N});
@@ -1354,12 +1358,10 @@ void testLLVMRFactorVectorizedReduction() {
   For* new_outer;
   For* split;
   For* tail;
-  loopnest.splitWithTail(outer_loop, 128, &new_outer, &split, &tail);
-  loopnest.vectorize(split);
+  //loopnest.splitWithTail(outer_loop, 8, &new_outer, &split, &tail);
+  loopnest.vectorize(outer_loop);
 
   s = IRSimplifier::simplify(s);
-  std::cerr << "----TE IR----\n";
-  std::cerr << *s << "\n";
   LLVMCodeGen cg(s, {a, b});
 
   PaddedBuffer<float> a_v(1, M, N, "a_v");
@@ -1374,16 +1376,17 @@ void testLLVMRFactorVectorizedReduction() {
       b_ref(0) += v;
     }
   }
-
-  for (size_t i = 0; i < 1000; ++i) {
-    cg.call({a_v, b_v});
-  }
-  {
-    Profiler p("llvm vec rfactor", M * N * iters, 128 * 2.5 * 1e9 / 4);
-    for (size_t i = 0; i < iters; ++i) {
-      cg.call({a_v, b_v});
-    }
-  }
+	cg.call({a_v, b_v});
+	//for (size_t i = 0; i < warmup; ++i) {
+	//	cg.call({a_v, b_v});
+	//}
+  //cg.call({a_v, b_v});
+  //{
+  //  Profiler p("llvm vec rfactor", M * N * iters, bandwidth * 2.5 * 1e9 / 4);
+  //  for (size_t i = 0; i < iters; ++i) {
+  //    cg.call({a_v, b_v});
+  //  }
+  //}
 
   ExpectAllNear(b_v, b_ref, 1e-5);
 }
@@ -1508,8 +1511,9 @@ ret_type genFunc2(Xbyak::CodeGenerator& code) {
   return f;
 }
 
-ret_type genFunc512(Xbyak::CodeGenerator& code) {
+ret_type genFunc512(Xbyak::CodeGenerator& code, size_t unroll_size) {
   using namespace Xbyak::util;
+	code.prefetcht1(ptr[rdi]);
   // load 64 values 8x8
   code.vmovups(zmm0, ptr[rdi + 4 * (0 + 0)]);
   code.vmovups(zmm1, ptr[rdi + 4 * (0 + 16)]);
@@ -1522,10 +1526,32 @@ ret_type genFunc512(Xbyak::CodeGenerator& code) {
 
   code.mov(rcx, 128);
 
+  if (unroll_size) {
+    assert(unroll_size > 128);
+    size_t unroll = unroll_size;
+    code.L("L1");
+    for (size_t off = 0; off < unroll; off += 128) {
+			code.vaddps(zmm0, zmm0, ptr[rdi + rcx * 4 + 4 * (off + 0)]);
+			code.vaddps(zmm1, zmm1, ptr[rdi + rcx * 4 + 4 * (off + 16)]);
+			code.vaddps(zmm2, zmm2, ptr[rdi + rcx * 4 + 4 * (off + 32)]);
+			code.vaddps(zmm3, zmm3, ptr[rdi + rcx * 4 + 4 * (off + 48)]);
+			code.vaddps(zmm4, zmm4, ptr[rdi + rcx * 4 + 4 * (off + 64)]);
+			code.vaddps(zmm5, zmm5, ptr[rdi + rcx * 4 + 4 * (off + 80)]);
+			code.vaddps(zmm6, zmm6, ptr[rdi + rcx * 4 + 4 * (off + 96)]);
+			code.vaddps(zmm7, zmm7, ptr[rdi + rcx * 4 + 4 * (off + 112)]);
+		}
+
+    code.add(rcx, unroll);
+    code.sub(rdx, unroll);
+    code.cmp(rdx, unroll);
+    code.jnbe("L1");
+  }
+
   {
     size_t unroll = 128;
     size_t off = 0;
     code.L("L0");
+		code.prefetcht1(ptr[rdi + rcx * 4]);
     code.vaddps(zmm0, zmm0, ptr[rdi + rcx * 4 + 4 * (off + 0)]);
     code.vaddps(zmm1, zmm1, ptr[rdi + rcx * 4 + 4 * (off + 16)]);
     code.vaddps(zmm2, zmm2, ptr[rdi + rcx * 4 + 4 * (off + 32)]);
@@ -1569,7 +1595,7 @@ ret_type genFunc512(Xbyak::CodeGenerator& code) {
 }
 
 void testLLVMRFactorReferenceReduction() {
-  size_t N = 64 * 128;
+  size_t N = outer * inner;
   std::vector<float> A(N);
   float ref_out = 0;
   for (size_t i = 0; i < N; ++i) {
@@ -1580,16 +1606,76 @@ void testLLVMRFactorReferenceReduction() {
   std::vector<float> C(4);
   C[0] = 0.0f;
 
+  //{
+  //  Xbyak::CodeGenerator code;
+  //  auto f = genFunc(code, 0);
+  //  f(A.data(), C.data(), A.size() - 1);
+  //  std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
+  //  for (size_t i = 0; i < warmup; ++i) {
+  //    f(A.data(), C.data(), A.size() - 1);
+  //  }
+  //  {
+  //    Profiler p("ref reduction no unroll", N * iters, bandwidth * 2.5 * 1e9 / 4);
+  //    for (size_t i = 0; i < iters; ++i) {
+  //      f(A.data(), C.data(), A.size() - 1);
+  //    }
+  //  }
+  //}
+  //{
+  //  Xbyak::CodeGenerator code;
+  //  auto f = genFunc(code, 128);
+  //  f(A.data(), C.data(), A.size() - 1);
+  //  std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
+  //  for (size_t i = 0; i < warmup; ++i) {
+  //    f(A.data(), C.data(), A.size() - 1);
+  //  }
+  //  {
+  //    Profiler p("ref reduction unroll=4", N * iters, bandwidth * 2.5 * 1e9 / 4);
+  //    for (size_t i = 0; i < iters; ++i) {
+  //      f(A.data(), C.data(), A.size() - 1);
+  //    }
+  //  }
+  //}
+  //{
+  //  Xbyak::CodeGenerator code;
+  //  auto f = genFunc(code, 2048);
+  //  f(A.data(), C.data(), A.size() - 1);
+  //  std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
+  //  for (size_t i = 0; i < warmup; ++i) {
+  //    f(A.data(), C.data(), A.size() - 1);
+  //  }
+  //  {
+  //    Profiler p("ref reduction unroll=64", N * iters, bandwidth * 2.5 * 1e9 / 4);
+  //    for (size_t i = 0; i < iters; ++i) {
+  //      f(A.data(), C.data(), A.size() - 1);
+  //    }
+  //  }
+  //}
+  //{
+  //  Xbyak::CodeGenerator code;
+  //  auto f = genFunc2(code);
+  //  f(A.data(), C.data(), A.size() - 1);
+  //  std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
+  //  for (size_t i = 0; i < warmup; ++i) {
+  //    f(A.data(), C.data(), A.size() - 1);
+  //  }
+  //  {
+  //    Profiler p("ref reduction 8 reg", N * iters, bandwidth * 2.5 * 1e9 / 4);
+  //    for (size_t i = 0; i < iters; ++i) {
+  //      f(A.data(), C.data(), A.size() - 1);
+  //    }
+  //  }
+  //}
   {
     Xbyak::CodeGenerator code;
-    auto f = genFunc(code, 0);
+    auto f = genFunc512(code,0);
     f(A.data(), C.data(), A.size() - 1);
     std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
-    for (size_t i = 0; i < 1000; ++i) {
+    for (size_t i = 0; i < warmup; ++i) {
       f(A.data(), C.data(), A.size() - 1);
     }
     {
-      Profiler p("ref reduction no unroll", N * iters, 128 * 2.5 * 1e9 / 4);
+      Profiler p("ref reduction 512 8 reg", N * iters, bandwidth * 2.5 * 1e9 / 4);
       for (size_t i = 0; i < iters; ++i) {
         f(A.data(), C.data(), A.size() - 1);
       }
@@ -1597,14 +1683,14 @@ void testLLVMRFactorReferenceReduction() {
   }
   {
     Xbyak::CodeGenerator code;
-    auto f = genFunc(code, 128);
+    auto f = genFunc512(code, 256);
     f(A.data(), C.data(), A.size() - 1);
     std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
-    for (size_t i = 0; i < 1000; ++i) {
+    for (size_t i = 0; i < warmup; ++i) {
       f(A.data(), C.data(), A.size() - 1);
     }
     {
-      Profiler p("ref reduction unroll=4", N * iters, 128 * 2.5 * 1e9 / 4);
+      Profiler p("ref reduction 512 8 reg unroll 256", N * iters, bandwidth * 2.5 * 1e9 / 4);
       for (size_t i = 0; i < iters; ++i) {
         f(A.data(), C.data(), A.size() - 1);
       }
@@ -1612,14 +1698,14 @@ void testLLVMRFactorReferenceReduction() {
   }
   {
     Xbyak::CodeGenerator code;
-    auto f = genFunc(code, 2048);
+    auto f = genFunc512(code, 512);
     f(A.data(), C.data(), A.size() - 1);
     std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
-    for (size_t i = 0; i < 1000; ++i) {
+    for (size_t i = 0; i < warmup; ++i) {
       f(A.data(), C.data(), A.size() - 1);
     }
     {
-      Profiler p("ref reduction unroll=64", N * iters, 128 * 2.5 * 1e9 / 4);
+      Profiler p("ref reduction 512 8 reg unroll 512", N * iters, bandwidth * 2.5 * 1e9 / 4);
       for (size_t i = 0; i < iters; ++i) {
         f(A.data(), C.data(), A.size() - 1);
       }
@@ -1627,29 +1713,14 @@ void testLLVMRFactorReferenceReduction() {
   }
   {
     Xbyak::CodeGenerator code;
-    auto f = genFunc2(code);
+    auto f = genFunc512(code, 1024);
     f(A.data(), C.data(), A.size() - 1);
     std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
-    for (size_t i = 0; i < 1000; ++i) {
+    for (size_t i = 0; i < warmup; ++i) {
       f(A.data(), C.data(), A.size() - 1);
     }
     {
-      Profiler p("ref reduction 8 reg", N * iters, 128 * 2.5 * 1e9 / 4);
-      for (size_t i = 0; i < iters; ++i) {
-        f(A.data(), C.data(), A.size() - 1);
-      }
-    }
-  }
-  {
-    Xbyak::CodeGenerator code;
-    auto f = genFunc512(code);
-    f(A.data(), C.data(), A.size() - 1);
-    std::cerr << "check " << C[0] << " vs ref " << ref_out << "\n";
-    for (size_t i = 0; i < 1000; ++i) {
-      f(A.data(), C.data(), A.size() - 1);
-    }
-    {
-      Profiler p("ref reduction 512 8 reg", N * iters, 128 * 2.5 * 1e9 / 4);
+      Profiler p("ref reduction 512 8 reg unroll 1024", N * iters, bandwidth * 2.5 * 1e9 / 4);
       for (size_t i = 0; i < iters; ++i) {
         f(A.data(), C.data(), A.size() - 1);
       }

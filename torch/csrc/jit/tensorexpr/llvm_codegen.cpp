@@ -42,6 +42,7 @@ class LLVMCodeGenImpl : public IRVisitor {
   llvm::BasicBlock* bb_;
   llvm::Value* value_{nullptr};
   llvm::JITTargetAddress kernelAddress_;
+  std::unique_ptr<void*[]> argv_{nullptr};
 
 #define LLVM_TYPE_DECLARE(_1, Name) llvm::Type* Name##Ty_;
   AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, LLVM_TYPE_DECLARE);
@@ -66,6 +67,7 @@ class LLVMCodeGenImpl : public IRVisitor {
   ~LLVMCodeGenImpl() = default;
 
   llvm::JITTargetAddress getKernelAddress() const;
+  void** getArgvAddress() const;
 
   void visit(const Add* v) override;
   void visit(const Sub* v) override;
@@ -188,11 +190,11 @@ void LLVMCodeGen::call(const std::vector<CallArg>& args) {
     throw malformed_input("wrong number of args in call");
   }
 
-  std::vector<void*> argv;
-  for (size_t i = 0; i < buffer_args().size(); i++) {
+  void** argv = impl_->getArgvAddress();
+  for (size_t i = 0, e = buffer_args().size(); i < e; i++) {
     auto const& bufferArg = buffer_args()[i];
     auto const& callArg = args[i];
-    argv.push_back(argToPtr(bufferArg, callArg));
+    argv[i] = argToPtr(bufferArg, callArg);
   }
   value<float>(argv);
   USE_TRIGGER(llvm_codegen_executed);
@@ -204,6 +206,10 @@ void* LLVMCodeGen::getKernelAddress(LLVMCodeGenImpl* impl) {
 
 llvm::JITTargetAddress LLVMCodeGenImpl::getKernelAddress() const {
   return kernelAddress_;
+}
+
+void** LLVMCodeGenImpl::getArgvAddress() const {
+  return argv_.get();
 }
 
 LLVMCodeGenImpl::LLVMCodeGenImpl(
@@ -261,6 +267,7 @@ LLVMCodeGenImpl::LLVMCodeGenImpl(
       llvm::orc::ThreadSafeModule(std::move(module_), context_)));
   auto sym = jit_->findSymbol("wrapper");
   kernelAddress_ = cantFail(sym.getAddress());
+  argv_ = std::make_unique<void*[]>(params.size());
 
   USE_TRIGGER(llvm_codegen_created);
 }
@@ -338,9 +345,13 @@ void LLVMCodeGenImpl::emitKernel(
   if (llvm::verifyFunction(*fn_, &llvm::outs())) {
     throw std::runtime_error("Function verification failed");
   }
+
+  llvm::errs() << "---UNOPTIMIZED---\n";
+  llvm::errs() << *module_;
+  llvm::errs() << "---OPTIMIZED---\n";
   optimize(*module_);
 
-#if DEBUG_PRINT
+//#if DEBUG_PRINT
   llvm::errs() << *module_;
   llvm::SmallVector<char, 0> asmBuffer;
   llvm::raw_svector_ostream asmStream(asmBuffer);
@@ -352,7 +363,7 @@ void LLVMCodeGenImpl::emitKernel(
       llvm::TargetMachine::CodeGenFileType::CGFT_AssemblyFile);
   PM.run(*module_);
   llvm::errs() << asmStream.str();
-#endif
+//#endif
 }
 
 // TODO: The binary ops are copypasta.
@@ -1467,25 +1478,12 @@ void LLVMCodeGenImpl::visit(const Allocate* v) {
     size = irb_.CreateMul(size, irb_.CreateZExt(value_, LongTy_));
   }
 
-  llvm::Instruction* I = llvm::CallInst::CreateMalloc(
-    irb_.GetInsertBlock(),
-    LongTy_,
-    dtypeToLLVM(v->dtype()),
-    size,
-    nullptr,
-    nullptr
-  );
-
-  // Insert the bitcast into the block.
-  irb_.SetInsertPoint(irb_.GetInsertBlock());
-  value_ = irb_.Insert(I);
+  value_ = irb_.CreateAlloca(dtypeToLLVM(v->dtype()), size);
   varToVal_[v->buffer_var()] = value_;
   value_ = llvm::ConstantInt::get(IntTy_, 0);
 }
 
 void LLVMCodeGenImpl::visit(const Free* v) {
-  llvm::Value* ptr = varToVal_.at(v->buffer_var());
-  irb_.Insert(llvm::CallInst::CreateFree(ptr, irb_.GetInsertBlock()));
   value_ = llvm::ConstantInt::get(IntTy_, 0);
 }
 
