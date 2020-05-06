@@ -48,7 +48,23 @@ class KernelScope {
 class TORCH_API KernelScopedObject {
  public:
   KernelScopedObject();
-  virtual ~KernelScopedObject() = default;
+  virtual ~KernelScopedObject() {
+    KernelArena* kernel = KernelArena::GetCurrentKernelArena();
+    size_t index = 0;
+    bool found = false;
+    auto& ks = kernel->kernel_objects_;
+    for (auto& k : ks) {
+      if (k == this) {
+        found = true;
+        break;
+      }
+      index++;
+    }
+    if (found) {
+      ks.erase(ks.begin() + index);
+      operator delete(this);
+    }
+  }
 
  private:
   KernelScopedObject(const KernelScopedObject&) = delete;

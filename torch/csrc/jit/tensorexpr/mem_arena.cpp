@@ -12,7 +12,7 @@ thread_local KernelArena* current_arena = nullptr;
 
 KernelArena::~KernelArena() {
   for (KernelScopedObject* p : kernel_objects_) {
-    delete p;
+    p->~KernelScopedObject();
   }
 }
 
