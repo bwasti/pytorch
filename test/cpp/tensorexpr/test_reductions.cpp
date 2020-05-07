@@ -1,3 +1,4 @@
+#include <torch/torch.h>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -12,8 +13,33 @@
 #include "torch/csrc/jit/tensorexpr/ir.h"
 #include "torch/csrc/jit/tensorexpr/ir_printer.h"
 #include "torch/csrc/jit/tensorexpr/ir_simplifier.h"
+#include "torch/csrc/jit/tensorexpr/llvm_codegen.h"
 #include "torch/csrc/jit/tensorexpr/loopnest.h"
 #include "torch/csrc/jit/tensorexpr/tensor.h"
+
+class Profiler {
+ public:
+  Profiler(std::string name, size_t achieved_flops, size_t peak_flops)
+      : m_name(std::move(name)),
+        m_beg(std::chrono::high_resolution_clock::now()),
+        flops(achieved_flops),
+        peak(peak_flops) {}
+  ~Profiler() {
+    auto end = std::chrono::high_resolution_clock::now();
+    auto dur =
+        std::chrono::duration_cast<std::chrono::microseconds>(end - m_beg);
+    float gflops = float(flops) / (dur.count() * float(1000));
+    float peak_gflops = float(peak) / 1e9;
+    std::cout << m_name << " : " << dur.count() << "us " << gflops << "GFlops ("
+              << 100.f * gflops / peak_gflops << "% of peak)\n";
+  }
+
+ private:
+  std::string m_name;
+  std::chrono::time_point<std::chrono::high_resolution_clock> m_beg;
+  size_t flops;
+  size_t peak;
+};
 
 namespace torch {
 namespace jit {
@@ -432,6 +458,107 @@ void testReduceMatmul2D() {
 
   for (int i = 0; i < 9; ++i) {
     ASSERT_EQ(out[i], expected[i]);
+  }
+}
+
+void naive_gemm(
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int M,
+    int N,
+    int K) {
+  for (auto m = 0; m < M; ++m) {
+    for (auto n = 0; n < N; ++n) {
+      float sum = 0.f;
+      for (auto k = 0; k < K; ++k) {
+        sum += A[m * K + k] * B[k * N + n];
+      }
+      C[m * N + n] = sum;
+    }
+  }
+}
+
+void testReduceMatmul2DBig() {
+  KernelScope kernel_scope;
+  // ripped from a the dense part of a real model
+  constexpr int M = 512;
+  constexpr int K = 1281;
+  constexpr int N = 512;
+
+  Buffer tA(BufHandle("tA", {M, K}, kFloat));
+  Buffer tB(BufHandle("tB", {K, N}, kFloat));
+
+  std::vector<float> tA_(M * K);
+  std::vector<float> tB_(K * N);
+
+  std::vector<float> out(M * N, -1.f);
+  std::vector<float> out_ref(M * N, -1.f);
+  for (int i = 0; i < N; ++i) {
+    for (int j = 0; j < M; ++j) {
+      for (int k = 0; k < K; ++k) {
+        tA_[i * K + k] = 1.f;
+        tB_[k * N + j] = 0.1f;
+      }
+    }
+  }
+
+  Tensor* mm = Reduce(
+      "mm",
+      {{M, "m"}, {N, "n"}},
+      Sum(),
+      [&](const ExprHandle& m, const ExprHandle& n, const ExprHandle& k) {
+        return tA(m, k) * tB(k, n);
+      },
+      {{K, "k"}});
+
+  LoopNest loop({mm});
+  loop.prepareForCodegen();
+  Stmt* s = loop.root_stmt();
+  s = IRSimplifier::simplify(s);
+
+  LLVMCodeGen cg(s, {tA, tB, mm});
+
+  constexpr size_t iters = 1e1;
+
+  cg.call({tA_, tB_, out});
+  {
+    Profiler p("llvm", iters * N * M * K * 2, 50e9);
+    for (auto i = 0; i < iters; ++i) {
+      cg.call({tA_, tB_, out});
+    }
+  }
+
+  naive_gemm(tA_.data(), tB_.data(), out_ref.data(), M, N, K);
+  {
+    Profiler p("naive", iters * N * M * K * 2, 50e9);
+    for (auto i = 0; i < iters; ++i) {
+      naive_gemm(tA_.data(), tB_.data(), out_ref.data(), M, N, K);
+    }
+  }
+
+  auto A = torch::randn({M, K});
+  auto B = torch::randn({K, N});
+  auto C = torch::randn({M, N});
+  at::matmul_out(A, B, C);
+  {
+    Profiler p("PT mm", iters * N * M * K * 2, 50e9);
+    for (auto i = 0; i < iters; ++i) {
+      at::matmul_out(A, B, C);
+    }
+  }
+
+  // I don't understand this API
+  // at::addmm_out(C, C, A, B);
+  //{
+  //  Profiler p("PT addmm", iters * N * M * K * 2, 50e9);
+  //  for (auto i = 0; i < iters; ++i) {
+  //		at::addmm_out(C, C, A, B);
+  //  }
+  //}
+
+  for (auto i = 0; i < M * N; ++i) {
+    ASSERT_LT(std::abs(out[i] - out_ref[i]), 0.01);
   }
 }
 

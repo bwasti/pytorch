@@ -57,6 +57,7 @@ namespace jit {
   _(ReduceMinCustomInitializer)             \
   _(ReduceAnyAll)                           \
   _(ReduceMatmul2D)                         \
+  _(ReduceMatmul2DBig)                      \
   _(ReduceRfactorLike)                      \
   _(ReduceRfactor)                          \
   _(Reduce3DRfactor)                        \
