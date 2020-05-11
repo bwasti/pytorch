@@ -859,5 +859,80 @@ void testReduce3DRfactorInsertionPoint() {
   ASSERT_EQ(out[0], 4950);
 }
 
+void naive_gemm(
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int M,
+    int N,
+    int K) {
+  for (auto m = 0; m < M; ++m) {
+    for (auto n = 0; n < N; ++n) {
+      float sum = 0.f;
+      for (auto k = 0; k < K; ++k) {
+        sum += A[m * K + k] * B[k * N + n];
+      }
+      C[m * N + n] = sum;
+    }
+  }
+}
+
+struct Pattern {
+};
+
+template <typename F>
+void replace(Tensor* t, const Pattern& p, F func) {
+}
+
+void testReduceMatmulSwap() {
+  KernelScope kernel_scope;
+  // ripped from a the dense part of a real model
+  constexpr int M = 512;
+  constexpr int K = 1281;
+  constexpr int N = 512;
+
+  Buffer tA(BufHandle("tA", {M, K}, kFloat));
+  Buffer tB(BufHandle("tB", {K, N}, kFloat));
+
+  std::vector<float> tA_(M * K);
+  std::vector<float> tB_(K * N);
+
+  std::vector<float> out(M * N, -1.f);
+  std::vector<float> out_ref(M * N, -1.f);
+  for (int i = 0; i < N; ++i) {
+    for (int j = 0; j < M; ++j) {
+      for (int k = 0; k < K; ++k) {
+        tA_[i * K + k] = 1.f;
+        tB_[k * N + j] = 0.1f;
+      }
+    }
+  }
+
+  Tensor* mm = Reduce(
+      "mm",
+      {{M, "m"}, {N, "n"}},
+      Sum(),
+      [&](const ExprHandle& m, const ExprHandle& n, const ExprHandle& k) {
+      return tA(m, k) * tB(k, n);
+      },
+      {{K, "k"}});
+
+  Pattern mm_pattern;
+  replace(mm, mm_pattern, naive_gemm);
+  LoopNest loop({mm});
+  loop.prepareForCodegen();
+  Stmt* s = loop.root_stmt();
+  s = IRSimplifier::simplify(s);
+
+  SimpleIREvaluator cg(s, {tA, tB, mm});
+
+  cg.call({tA_, tB_, out});
+  naive_gemm(tA_.data(), tB_.data(), out_ref.data(), M, N, K);
+
+  for (auto i = 0; i < M * N; ++i) {
+    ASSERT_LT(std::abs(out[i] - out_ref[i]), 0.01);
+  }
+}
+
 } // namespace jit
 } // namespace torch
