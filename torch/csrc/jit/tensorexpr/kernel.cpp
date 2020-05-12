@@ -1467,7 +1467,7 @@ std::vector<CodeGen::CallArg> TensorExprKernel::prepareRunArgs(
 }
 
 void TensorExprKernel::lowerToBackend(const at::ArrayRef<IValue>& inputs) {
-  checkInputs(inputs, inputTypes_);
+  //checkInputs(inputs, inputTypes_);
 
   at::Device device = pickDeviceType(inputs);
   if (!codegenCache_.count(torch::get_hash(device))) {

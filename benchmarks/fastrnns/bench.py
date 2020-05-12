@@ -209,7 +209,8 @@ if __name__ == '__main__':
     assert args.fuser in ['te', 'old', 'none']
     torch._C._jit_set_texpr_fuser_enabled(args.fuser == 'te')
     torch._C._jit_override_can_fuse_on_gpu(args.fuser == 'old')
-    torch._C._jit_set_bailout_depth(20)
+    torch._C._jit_set_profiling_mode(args.fuser == 'te')
+    torch._C._jit_set_profiling_executor(args.fuser == 'te')
     if args.cuda_pointwise_loop_level:
         torch._C._jit_set_te_cuda_pointwise_loop_levels(args.cuda_pointwise_loop_level)
     if args.cuda_pointwise_block_count:
