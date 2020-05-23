@@ -11,9 +11,14 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Support/Error.h>
+#include <llvm/IRReader/IRReader.h>
+#include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Transforms/IPO/PassManagerBuilder.h>
+#include <llvm/Transforms/Utils/ValueMapper.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 
 #include <torch/csrc/jit/tensorexpr/buffer.h>
 #include <torch/csrc/jit/tensorexpr/execution_counter.h>
@@ -38,6 +43,8 @@ class LLVMCodeGenImpl : public IRVisitor {
   std::unique_ptr<llvm::TargetMachine> TM_;
   std::unique_ptr<llvm::orc::PytorchLLVMJIT> jit_;
   std::unique_ptr<llvm::Module> module_;
+  std::unique_ptr<llvm::Module> sleef_;
+  llvm::ValueToValueMapTy vmap_;
   llvm::Function* fn_;
   llvm::BasicBlock* bb_;
   llvm::Value* value_{nullptr};
@@ -238,6 +245,38 @@ LLVMCodeGenImpl::LLVMCodeGenImpl(
   module_ = std::make_unique<llvm::Module>("pytorch", getContext());
   module_->setDataLayout(cantFail(JTMB.getDefaultDataLayoutForTarget()));
   module_->setTargetTriple(JTMB.getTargetTriple().str());
+  llvm::SMDiagnostic error;
+  auto sleef_loc = "/home/bwasti/pytorch/torch/csrc/jit/tensorexpr/sleef/sleef_full.ll";
+  sleef_ = llvm::getLazyIRFileModule(sleef_loc, error, getContext());
+  if (!sleef_) {
+    std::string what;
+    llvm::raw_string_ostream os(what);
+    error.print("error after ParseIR()", os);
+    llvm::errs() << what;
+  }
+  auto& flist = sleef_->getFunctionList();
+  for (auto& f : flist) {
+    //if (f.getName().substr(0,6) != "Sleef_") {
+    //  continue;
+    //}
+    //llvm::errs() << f.getName() << "\n";
+    //llvm::Function::ExternalLinkage
+    auto linkage = llvm::Function::ExternalLinkage;
+    ////f.getLinkage() 
+    auto decl = llvm::Function::Create(f.getFunctionType(), linkage, f.getName(), module_.get());
+    vmap_[&f] = decl;
+    llvm::SmallVector<llvm::ReturnInst*, 8> rets;
+    //if (!decl) {
+    //  llvm::errs() << "decl not valid \n";
+    //}
+    //if (!&f) {
+    //  llvm::errs() << "f not valid \n";
+    //}
+    llvm::CloneFunctionInto(decl, &f, vmap_, false, rets);
+    //llvm::errs() << f.getName() << "\n";
+  }
+  cantFail(jit_->addModule(
+      llvm::orc::ThreadSafeModule(std::move(sleef_), context_)));
 
   // Emit prototype and bind argument Vars to parameter indices.
   llvm::Type* retTy = dtypeToLLVM(dtype);
@@ -359,6 +398,7 @@ void LLVMCodeGenImpl::emitKernel(
       llvm::TargetMachine::CodeGenFileType::CGFT_AssemblyFile);
   PM.run(*module_);
   llvm::errs() << asmStream.str();
+  throw std::runtime_error("error");
 #endif
 }
 
@@ -1115,19 +1155,19 @@ void LLVMCodeGenImpl::visit(const Intrinsics* v) {
         return;
       } break;
 
-#if defined(__AVX__) && !defined(_MSC_VER)
+#if defined(__AVX__) && !defined(_MSC_VER) || 1
 #define SIMD_UNARY_MATH_CASE(enum, name, type)                               \
   case enum: {                                                               \
     llvm::FunctionCallee callee;                                             \
     std::string fname;                                                       \
     if (v->dtype().lanes() == 8) {                                           \
-      fname = "Sleef_" + std::string(name) + "8";                            \
+      fname = "Sleef_" + std::string(name) + "8_u10avx2";                    \
       llvm::Type* vecType = llvm::VectorType::get(type, v->dtype().lanes()); \
       callee = module_->getOrInsertFunction(                                 \
           fname, llvm::FunctionType::get(vecType, {vecType}, false), {});    \
       call_simd_sleef = true;                                                \
     } else if (v->dtype().lanes() == 4) {                                    \
-      fname = "Sleef_" + std::string(name) + "4";                            \
+      fname = "Sleef_" + std::string(name) + "4_u10avx2128";                 \
       llvm::Type* vecType = llvm::VectorType::get(type, v->dtype().lanes()); \
       callee = module_->getOrInsertFunction(                                 \
           fname, llvm::FunctionType::get(vecType, {vecType}, false), {});    \
@@ -1141,6 +1181,7 @@ void LLVMCodeGenImpl::visit(const Intrinsics* v) {
     applyMathFunctionAttributes(llvm::cast<llvm::Function>(call_fn));        \
   } break;
 #else
+#error
 #define SIMD_UNARY_MATH_CASE(enum, name, type)                               \
   case enum: {                                                               \
     llvm::FunctionCallee callee;                                             \
@@ -1430,7 +1471,10 @@ void LLVMCodeGenImpl::visit(const Intrinsics* v) {
         call_operands.push_back(irb_.CreateExtractElement(p, i));
       }
 
-      llvm::Value* val = irb_.CreateCall(call_ty, call_fn, call_operands);
+      llvm::CallInst* call = irb_.CreateCall(call_ty, call_fn, call_operands);
+      //llvm::InlineFunctionInfo ifi;
+      //llvm::InlineFunction(call, ifi);
+      llvm::Value* val = call;
       value_ = irb_.CreateInsertElement(value_, val, i);
     }
   }
