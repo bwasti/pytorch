@@ -106,6 +106,17 @@ def trivial_graph(a, b, c):
     return a + b * c + s
 
 
+def trivial_fusion(i0, i1, i2, i3, add_in, mul_in):
+    inps = [i0, i1, i2, i3]
+    cat = torch.cat(inps, 1)
+    cat += add_in
+    cat *= mul_in
+    Y = cat.clone()
+    Y[torch.isnan(cat)] = 0
+    Y = torch.clamp(Y, -10.0, 10.0)
+    return Y
+
+
 class TestStaticRuntime(TestCase):
     def test_multihead_attention_layer(self):
         HID_DIM = 256
@@ -191,6 +202,17 @@ class TestStaticRuntime(TestCase):
         o_ref = tg(s, s, s)
         tg_a = StaticRuntime(tg)
         o_test = tg_a(s, s, s)[0]
+        torch.testing.assert_allclose(o_ref, o_test)
+
+    def test_trivial_fusion(self):
+        tg = torch.jit.script(trivial_fusion)
+        b = 1
+        inps = [torch.randn(b, 10) for _ in range(4)]
+        add = torch.randn(1, 4 * 10)
+        mul = torch.randn(1, 4 * 10)
+        o_ref = tg(*inps, add, mul)
+        tg_a = StaticRuntime(tg)
+        o_test = tg_a(*inps, add, mul)[0]
         torch.testing.assert_allclose(o_ref, o_test)
 
 
